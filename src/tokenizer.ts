@@ -25,6 +25,7 @@ enum State {
 
   attrLeftDQuotes, // "
   attrRightDQuotes, // "
+  attrWithoutQuotes,
 
   // comment: <!
   comment
@@ -160,6 +161,24 @@ export class Tokenizer {
     return /[\s\t\n]/.test(char);
   }
 
+  private isExpressionHead(currentChar: string) {
+    return /^{{/.test(currentChar);
+  }
+
+  private isExpressionEnd(currentChar: string) {
+    return /^{{.+}}/.test(currentChar);
+  }
+
+  private isExpressionOpen(currentChar: string) {
+    const reverseChar = currentChar.split('').reverse().join('');
+    let openIndex = reverseChar.indexOf('{{');
+    let closeIndex = reverseChar.indexOf('}}');
+    openIndex = openIndex === -1 ? Infinity : openIndex;
+    closeIndex = closeIndex === -1 ? Infinity : closeIndex;
+
+    return openIndex < closeIndex;
+  }
+
   private checkElemName(elemName: string): boolean {
     const result = this.checkElementName(elemName);
     if (result) {
@@ -210,7 +229,7 @@ export class Tokenizer {
   // state: text
   private stateText(char: string) {
     this.current = '';
-    while (char !== '<') {
+    while (char !== '<' || this.isExpressionOpen(this.current)) {
       this.current += char;
       if (this.index < this.maxIndex) {
         char = this.feed();
@@ -410,48 +429,18 @@ export class Tokenizer {
       return;
     }
 
-    // support attribute value without quotes.
-    if (this.attributeValueWithoutQuotes) {
-      while (this.index < this.maxIndex) {
-        if (char === '>') {
-          this.emit('attributeValue');
-          this.current = '';
-          this.state = State.text;
-          break;
-        }
-
-        if (this.isEmptyChar(char)) {
-          this.emit('attributeValue');
-          this.current = '';
-          this.state = State.attrNameStart;
-          break;
-        }
-
-        if (char === '/') {
-          this.emit('attributeValue');
-          this.current = '';
-          this.state = State.elemSelfClosing;
-          break;
-        }
-
-        this.current += char;
-        char = this.feed();
-      }
-      return;
-    }
-
-    throw new Error('Invalid attribute value!');
-    console.error('Invalid attribute value!');
+    this.state = State.attrWithoutQuotes;
+    this.feed(-1);
   }
 
   // state: attrLeftSQuotes or attrLeftDQuotes
   private stateAttrLeftQuotes(char: string) {
     const quote = {
-      [State.attrLeftSQuotes]: `'`,
-      [State.attrLeftDQuotes]: '"'
+      [State.attrLeftSQuotes]: '\'',
+      [State.attrLeftDQuotes]: '"',
     }[this.state as State.attrLeftSQuotes | State.attrLeftDQuotes];
 
-    let isEscape: boolean = false;
+    let isEscape = false;
     while ((char !== quote || isEscape) && this.index < this.maxIndex) {
       this.current += char;
       isEscape = !isEscape && char === '\\';
@@ -461,7 +450,49 @@ export class Tokenizer {
     this.emit('attributeValue');
     this.current = '';
     this.state = State.attrNameStart;
-    return;
+  }
+
+  // state: attrWithoutDQuotes
+  private stateAttrWithoutQutes(char: string) {
+    // support attribute value without quotes.
+    if (this.attributeValueWithoutQuotes) {
+      while (this.index < this.maxIndex) {
+        // 由{{开头的属性
+        if (this.isExpressionHead(this.current)) {
+          // 匹配到关闭符号
+          if (this.isExpressionEnd(this.current + char)) {
+            this.emit('attributeValue');
+            this.current = '';
+            this.state = State.attrNameStart;
+            return;
+          }
+        } else {
+          if (char === '>') {
+            this.emit('attributeValue');
+            this.current = '';
+            this.state = State.text;
+            return;
+          }
+
+          if (this.isEmptyChar(char)) {
+            this.emit('attributeValue');
+            this.current = '';
+            this.state = State.attrNameStart;
+            return;
+          }
+
+          if (char === '/') {
+            this.emit('attributeValue');
+            this.current = '';
+            this.state = State.elemSelfClosing;
+            return;
+          }
+        }
+        this.current += char;
+        char = this.feed();
+      }
+      throw new Error('Invalid attribute value!');
+    }
   }
 
   // state: elemSelfClosing
@@ -478,7 +509,6 @@ export class Tokenizer {
     }
 
     throw new Error('Invalid char in self-closing element!');
-    console.error('Invalid char in self-closing element!');
   }
 
   // state: elemOpenEnd
@@ -598,6 +628,12 @@ export class Tokenizer {
           continue;
         }
 
+
+        if (this.state === State.attrWithoutQuotes) {
+          this.stateAttrWithoutQutes(char);
+          continue;
+        }
+
         // elemSelfClosing
         if (this.state === State.elemSelfClosing) {
           this.stateElemSelfClosing(char);
@@ -621,8 +657,8 @@ export class Tokenizer {
       this.emit('end');
     } catch (err) {
       this.error = err;
-      this.emit('error');
       console.error(err);
+      this.emit('error');
     }
   }
 }
